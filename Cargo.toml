@@ -1,0 +1,10 @@
+[package]
+name = "rasterizer"
+version = "0.1.0"
+authors = ["Thomas Lin <dkeehl@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+obj-rs = "0.6"
+rand = "0.7"
+tinytga = "0.3.2"
