@@ -14,7 +14,7 @@ pub struct Model {
 impl Model {
     pub fn read_file(path: &str) -> Option<Model> {
         let input = BufReader::new(File::open(path).ok()?);
-        let raw = parse_obj(input).ok()?;
+        let raw = parse_obj(input).unwrap();
         Some(Model::from_raw(raw))
     }
 
@@ -40,6 +40,20 @@ impl Model {
         let texture = i.texture.map(|i| &self.textures[i]);
         let normal = i.normal.map(|i| &self.normals[i]);
         VertexVal { position, texture, normal }
+    }
+
+    fn inspect(&self) {
+        let mut counts = [0; 6];
+        for p in self.polygons() {
+            let c = p.vertice().len();
+            if c >= 5 {
+                counts[5] += 1;
+            } else {
+                counts[c] += 1;
+            }
+        }
+        let total = self.polygons().len();
+        println!("total {} polygons, {:?}", total, counts);
     }
 }
 
@@ -75,6 +89,33 @@ impl Polygon {
         model.index(&self.vertice[1]),
         model.index(&self.vertice[2])]
     }
+
+    pub fn triangles(&self) -> Triangles<'_> {
+        Triangles {
+            vertice: self.vertice(),
+            v_1: 1,
+        }
+    }
+}
+
+pub struct Triangles<'a> {
+    vertice: &'a [Vertex],
+    v_1: usize,
+}
+
+impl<'a> Iterator for Triangles<'a> {
+    type Item=[usize; 3];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let v_2 = self.v_1 + 1;
+        if v_2 >= self.vertice.len() {
+            None
+        } else {
+            let ret = [0, self.v_1, v_2];
+            self.v_1 = v_2;
+            Some(ret)
+        }
+    }
 }
 
 fn make_polygon(poly: &object::Polygon) -> Polygon {
@@ -86,3 +127,14 @@ fn make_polygon(poly: &object::Polygon) -> Polygon {
     };
     Polygon { vertice }
 }
+
+#[cfg(test)]
+mod test {
+    #[test]
+    fn model_info() {
+        super::Model::read_file("obj/african_head/african_head.obj")
+            .unwrap()
+            .inspect()
+    }
+}
+

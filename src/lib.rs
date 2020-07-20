@@ -2,15 +2,17 @@
 #![allow(unused, incomplete_features)]
 
 mod tga; 
+#[macro_use]
 mod geometry;
 mod transform;
 pub mod model;
+pub mod gui;
 
 pub use tga::{TGAColor, TGAImage, Buffer, Rate};
 pub use geometry::{Point2i, Vector2i, Point2f, Point3f, Vector3f, Normal, Bounds2i, Bounds2f,
     Dot, Point};
 use model::Model;
-use transform::{m, Transform};
+use transform::{m, Transform, Trans};
 
 pub fn line(p0: Point2i, p1: Point2i, img: &mut Buffer, color: TGAColor) {
     let slope = Slope::new(p0[0], p0[1], p1[0], p1[1]);
@@ -94,7 +96,7 @@ impl Iterator for Points {
     }
 }
 
-fn barycentric(a: &Point2i, b: &Point2i, c: &Point2i, p: &Point2i) -> Point3f {
+fn barycentric_i(a: &Point2i, b: &Point2i, c: &Point2i, p: &Point2i) -> Point3f {
     let ab = b - a;
     let ac = c - a;
     let ap = p - a;
@@ -119,7 +121,7 @@ pub fn triangle<T: Shader>(pts: &[Point3f; 3], shader: &T, buf: &mut Buffer) {
     let mut bounds = Bounds2i::new(a, b);
     bounds.add_point(c);
     for p in bounds.points_inclusive() {
-        let b = barycentric(&a, &b, &c, &p);
+        let b = barycentric_i(&a, &b, &c, &p);
         let include = b[0] >= 0.0 && b[1] >= 0.0 && b[2] >= 0.0;
         if include {
             if let Some(mut pos) = buf.position(&p) {
@@ -135,9 +137,59 @@ pub fn triangle<T: Shader>(pts: &[Point3f; 3], shader: &T, buf: &mut Buffer) {
     }
 }
 
+fn include(a: &Point2i, b: &Point2i, c: &Point2i, p: &Point2i) -> bool {
+    let ab = b - a;
+    let ac = c - a;
+    let ap = p - a;
+    let det = ab.x() * ac.y() - ab.y() * ac.x();
+    if det != 0 {
+        let s = det.signum();
+        let u = ap.x() * ac.y() - ap.y() * ac.x();
+        if u * s < 0 { return false; }
+        let v = ap.y() * ab.x() - ap.x() * ab.y();
+        v * s >= 0 && (det - u - v) * s >= 0
+    } else {
+        false
+    }
+}
+
+// pts is vertice of the triangle in world space
+pub fn triangle0<T: Shader>(pts: &[Point3f; 3], cam: &Camera, shader: &T, buf: &mut Buffer) {
+    // transform pts into raster space
+    let f = |i: usize| -> Point2i {
+        buf.screen_to_raster(&(&pts[i]).trans(&cam.world_to_screen))
+    };
+    let (a, b, c) = (f(0), f(1), f(2));
+    let mut bounds = Bounds2i::new(a, b);
+    bounds.add_point(c);
+    for fragment in bounds.points_inclusive() {
+        if include(&a, &b, &c, &fragment) {
+            if let Some(mut pos) = buf.position(&fragment) {
+                // take samples for this fragment, compute z value and the color
+                let sample = pos.sample();
+
+                // transform the sampling point to world space, compute the barycentric coordinate
+                let r = cam.generate_ray(&sample);
+                let baryc = r.intersect(pts);
+                let z = pts[0][2] * baryc[0] + pts[1][2] * baryc[1] + pts[2][2] * baryc[2];
+                if z > pos.z_buffer_get() {
+                    if let Some(color) = shader.fragment(&baryc) {
+                        pos.set_color(color);
+                        pos.z_buffer_set(z);
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub struct Camera {
+    eye: Point3f,
     world_to_screen: Transform,
     world_normal_to_screen: Transform,
+    camera_to_world: Transform,
+    world_to_camera: Transform,
+    r: f32,
 }
 
 impl Camera {
@@ -155,13 +207,63 @@ impl Camera {
             [ 0.0,  0.0,  0.0, 1.0] ]));
         let origin_change = Transform::translate(-pos[0], -pos[1], -pos[2]);
         let world_to_camera = basis_change * origin_change;
+        let camera_to_world = world_to_camera.inverse()?;
+        let r = -eye.recip();
         let camera_to_screen = camera_to_screen(eye);
-        let world_to_screen = camera_to_screen * world_to_camera;
+        let world_to_screen = camera_to_screen * world_to_camera.clone();
         let world_normal_to_screen = world_to_screen.inverse_transpose()?;
+        let eye = camera_to_world.trans(p![0.0, 0.0, eye]);
         Some(Camera {
+            eye,
             world_to_screen,
             world_normal_to_screen,
+            camera_to_world,
+            world_to_camera,
+            r,
         })
+    }
+
+    // Ray in world space
+    pub fn generate_ray(&self, p_screen: &Point2f) -> Ray {
+        let p_camera = p!(p_screen[0], p_screen[1], 0.0);
+        let p_world = self.camera_to_world.trans(p_camera);
+        let d = (p_world - &self.eye).normalize();
+        Ray {
+            o: self.eye.clone(),
+            d,
+        }
+    }
+
+    // Given a barycentric coordinate in screen space, fix it to the camera/world space.
+    // pts are in camera space
+    // TODO Here we need only z coordinates of the points
+    pub fn fix_baryc(&self, baryc: &Point3f, pts: &[Point3f; 3]) -> Point3f {
+        let a = baryc[0] / (self.r * pts[0].z() + 1.0);
+        let b = baryc[1] / (self.r * pts[1].z() + 1.0);
+        let c = baryc[2] / (self.r * pts[2].z() + 1.0);
+        let sum = (a + b + c).recip();
+        p!(a * sum, b * sum, c * sum)
+    }
+}
+
+pub struct Ray {
+    o: Point3f,
+    d: Vector3f,
+}
+
+impl Ray {
+    // intersect test with a plane, returns a barycentric coordinate with the 3 points.
+    // Moeller Trumbore Algorithm
+    fn intersect(&self, triangle: &[Point3f; 3]) -> Point3f {
+        let e1 = &triangle[1] - &triangle[0];
+        let e2 = &triangle[2] - &triangle[0];
+        let s = &self.o - &triangle[0];
+        let s1 = self.d.cross(&e2);
+        let s2 = s.cross(&e1);
+        let scaler = s1.dot(&e1).recip();
+        let b1 = s1.dot(&s) * scaler;
+        let b2 = s2.dot(&self.d) * scaler;
+        p!(1.0 - b1 - b2, b1, b2)
     }
 }
 
@@ -192,36 +294,79 @@ pub trait Shader {
     fn fragment(&self, baryc: &Point3f) -> Option<TGAColor>;
 }
 
-pub struct Gouraud<'a, 'b> {
+pub struct Plane<'a> {
+    model: &'a Model,
+    camera: &'a Camera,
+    varying_i: [f32; 3],
+    light_dir: Vector3f,
+}
+
+impl<'a> Shader for Plane<'a>
+{
+    fn vertex(&mut self, f: usize, v: usize) -> Point3f {
+        let vt = self.model.vertex(f, v);
+        let intensity = vt.normal.unwrap().dot(&self.light_dir).max(0.0);
+        self.varying_i[v] = intensity;
+        self.camera.world_to_screen.trans(vt.position)
+    }
+
+    fn fragment(&self, _: &Point3f) -> Option<TGAColor> {
+        let i = self.varying_i.iter().sum::<f32>() / 3.0 * 255.0;
+        let i = i as u8;
+        let color = TGAColor::rgba(i, i, i, 255);
+        Some(color)
+    }
+}
+
+pub struct Gouraud<'a, 'b, D> {
+    varying_p: [Point3f; 3],
     varying_intensity: [f32; 3],
+    varying_u: [f32; 3],
+    varying_v: [f32; 3],
+    i: usize,
     light_dir: Vector3f,
     model: &'a Model,
     camera: &'b Camera,
+    diffuse: D,
 }
 
-impl<'a, 'b> Gouraud<'a, 'b> {
-    pub fn new(model: &'a Model, camera: &'b Camera, light_dir: Vector3f) -> Self {
+impl<'a, 'b, D> Gouraud<'a, 'b, D> {
+    pub fn new(model: &'a Model, camera: &'b Camera, light_dir: Vector3f, diffuse: D) -> Self {
         Gouraud {
-            varying_intensity: [0.0, 0.0, 0.0],
-            light_dir,
+            varying_p: [[0.0; 3].into(), [0.0; 3].into(), [0.0; 3].into()],
+            varying_intensity: [0.0; 3],
+            varying_u: [0.0; 3],
+            varying_v: [0.0; 3],
+            i: 0,
+            light_dir: light_dir.normalize(),
             model,
             camera,
+            diffuse,
         }
     }
 }
 
-impl<'a, 'b> Shader for Gouraud<'a, 'b> {
+impl<'a, 'b, D: Texture<TGAColor>> Shader for Gouraud<'a, 'b, D> {
     fn vertex(&mut self, f: usize, v: usize) -> Point3f {
         let vt = self.model.vertex(f, v);
         let intensity = vt.normal.unwrap().dot(&self.light_dir).max(0.0);
-        self.varying_intensity[v] = intensity;
+        self.varying_intensity[self.i] = intensity;
+        let uv = vt.texture.unwrap();
+        self.varying_u[self.i] = uv[0];
+        self.varying_v[self.i] = uv[1];
+        self.varying_p[self.i] = self.camera.world_to_camera.trans(vt.position);
+        self.i = (self.i + 1) % 3;
         self.camera.world_to_screen.trans(vt.position)
     }
 
     fn fragment(&self, baryc: &Point3f) -> Option<TGAColor> {
-        let i = self.varying_intensity.dot(baryc);
-        let y = clamp((255.0 * i).floor(), 0.0, 255.0) as u8;
-        let color = TGAColor::rgba(y, y, y, 255);
+        let baryc = self.camera.fix_baryc(baryc, &self.varying_p);
+        let i = self.varying_intensity.dot(&baryc);
+        let i = clamp(i, 0.0, 255.0);
+        let u = self.varying_u.dot(&baryc);
+        let v = self.varying_v.dot(&baryc);
+        let c = self.diffuse.eval(u, v);
+        let color = c * Rate::unchecked(i);
         Some(color)
     }
 }
@@ -254,7 +399,7 @@ impl Texture<i32> for TGAImage {
     }
 }
 
-struct Constant<T> {
+pub struct Constant<T> {
     val: T 
 }
 
@@ -265,88 +410,8 @@ impl<T: Clone> Texture<T> for Constant<T> {
 }
 
 impl<T> Constant<T> {
-    fn new(val: T) -> Self {
+    pub fn new(val: T) -> Self {
         Constant { val }
-    }
-}
-
-pub struct Phong<'a, D, N, S, A> {
-    varying_u: [f32; 3],
-    varying_v: [f32; 3],
-    varying_p: [Point3f; 3],
-    varying_n: [Normal; 3],
-    model: &'a Model,
-    camera: &'a Camera,
-    light_dir: Vector3f,
-    diffuse: D,
-    normal_map: N,
-    spec: S,
-    ambient: A,
-}
-
-impl<'a> Phong<'a, (), (), (), ()> {
-    pub fn new(model: &'a Model, camera: &'a Camera, light_dir: Vector3f, ambient: f32,
-        diffuse_path: &str, nm_path: &str, spec_path: &str) -> Option<impl Shader + 'a>
-    {
-        let diffuse = TGAImage::read_file(diffuse_path)?;
-        let normal_map = TGAImage::read_file(nm_path)?;
-        let spec = TGAImage::read_file(spec_path)?;
-        Some(Phong {
-            varying_u: [0.0; 3],
-            varying_v: [0.0; 3],
-            varying_p: [[0.0; 3].into(), [0.0; 3].into(), [0.0; 3].into()],
-            varying_n: [[0.0; 3].into(), [0.0; 3].into(), [0.0; 3].into()],
-            model,
-            camera,
-            light_dir,
-            diffuse,
-            normal_map,
-            spec,
-            ambient: Constant::new(ambient),
-        })
-    }
-}
-
-impl<'a, D, N, S, A> Shader for Phong<'a, D, N, S, A>
-where
-    D: Texture<TGAColor>,
-    N: Texture<Normal>,
-    S: Texture<i32>,
-    A: Texture<f32>,
-{
-    fn vertex(&mut self, fi: usize, vi: usize) -> Point3f {
-        let vt = self.model.vertex(fi, vi);
-        let uv = vt.texture.unwrap();
-        self.varying_u[vi] = uv[0];
-        self.varying_v[vi] = uv[1];
-        self.varying_p[vi] = vt.position.clone();
-        self.varying_n[vi] = vt.normal.unwrap().clone();
-        self.camera.world_to_screen.trans(vt.position)
-    }
-
-    fn fragment(&self, baryc: &Point3f) -> Option<TGAColor> {
-        let u = self.varying_u.dot(baryc);
-        let v = self.varying_v.dot(baryc);
-        let c = self.diffuse.eval(u, v).unpack();
-
-        let gn = self.varying_n.dot(baryc).normalize();
-        let [t, b] = darboux(&gn, &self.varying_p, self.varying_u, self.varying_v)
-            .unwrap();
-
-        let local = self.normal_map.eval(u, v);
-        let n = (t * local[0] + b * local[1] + gn * local[2]).normalize();
-        let d = n.dot(&self.light_dir).max(0.0);
-        let r = &n * (n.dot(&self.light_dir) * 2.0) - &self.light_dir;
-        let r = self.camera.world_to_screen.trans(r).normalize();
-        let a = self.spec.eval(u, v);
-        let s = r.z().min(0.0).powi(a);
-        let amb = self.ambient.eval(u, v);
-        const SPECULAR_COE: f32 = 0.6;
-        let f = |x| {
-            let x = amb + x as f32 * (d + SPECULAR_COE * s);
-            clamp(x, 0.0, 255.0) as u8
-        };
-        Some(TGAColor::rgba(f(c.r), f(c.g), f(c.b), c.a))
     }
 }
 
@@ -386,10 +451,12 @@ fn barycentric_point(pts: &[Point3f; 3], baryc: &Point3f) -> Point3f {
     Point::from([0.0, 0.0, 0.0]) + (f(0) + f(1) + f(2))
 }
 
-pub struct Phong2<'a, D, N, S, A> {
+pub struct Phong<'a, D, N, S, A> {
+    i: usize,
     varying_u: [f32; 3],
     varying_v: [f32; 3],
     varying_p: [Point3f; 3],
+    varying_p_cam: [Point3f; 3],
     varying_n: [Normal; 3],
     model: &'a Model,
     camera: &'a Camera,
@@ -402,7 +469,7 @@ pub struct Phong2<'a, D, N, S, A> {
     shadow_z: &'a Buffer,
 }
 
-impl<'a> Phong2<'a, (), (), (), ()> {
+impl<'a> Phong<'a, (), (), (), ()> {
     pub fn new(
         model: &'a Model,
         camera: &'a Camera,
@@ -415,14 +482,16 @@ impl<'a> Phong2<'a, (), (), (), ()> {
         let diffuse = TGAImage::read_file(diffuse_path)?;
         let normal_map = TGAImage::read_file(nm_path)?;
         let spec = TGAImage::read_file(spec_path)?;
-        Some(Phong2 {
+        Some(Phong {
+            i: 0,
             varying_u: [0.0; 3],
             varying_v: [0.0; 3],
             varying_p: [[0.0; 3].into(), [0.0; 3].into(), [0.0; 3].into()],
+            varying_p_cam: [[0.0; 3].into(), [0.0; 3].into(), [0.0; 3].into()],
             varying_n: [[0.0; 3].into(), [0.0; 3].into(), [0.0; 3].into()],
             model,
             camera,
-            light_dir,
+            light_dir: light_dir.normalize(),
             diffuse,
             normal_map,
             spec,
@@ -433,7 +502,7 @@ impl<'a> Phong2<'a, (), (), (), ()> {
     }
 }
 
-impl<'a, D, N, S, A> Shader for Phong2<'a, D, N, S, A>
+impl<'a, D, N, S, A> Shader for Phong<'a, D, N, S, A>
 where
     D: Texture<TGAColor>,
     N: Texture<Normal>,
@@ -443,21 +512,24 @@ where
     fn vertex(&mut self, fi: usize, vi: usize) -> Point3f {
         let vt = self.model.vertex(fi, vi);
         let uv = vt.texture.unwrap();
-        self.varying_u[vi] = uv[0];
-        self.varying_v[vi] = uv[1];
-        self.varying_p[vi] = vt.position.clone();
-        self.varying_n[vi] = vt.normal.unwrap().clone();
+        self.varying_u[self.i] = uv[0];
+        self.varying_v[self.i] = uv[1];
+        self.varying_p[self.i] = vt.position.clone();
+        self.varying_n[self.i] = vt.normal.unwrap().clone();
+        self.varying_p_cam[self.i] = self.camera.world_to_camera.trans(vt.position);
+        self.i = (self.i + 1) % 3;
         self.camera.world_to_screen.trans(vt.position)
     }
 
     fn fragment(&self, baryc: &Point3f) -> Option<TGAColor> {
-        let u = self.varying_u.dot(baryc);
-        let v = self.varying_v.dot(baryc);
+        let baryc = self.camera.fix_baryc(baryc, &self.varying_p_cam);
+        let u = self.varying_u.dot(&baryc);
+        let v = self.varying_v.dot(&baryc);
         let c = self.diffuse.eval(u, v).unpack();
 
         let pts = &self.varying_p;
         // reconstruct p in world space
-        let p = barycentric_point(pts, baryc);
+        let p = barycentric_point(pts, &baryc);
         let p = self.light.world_to_screen.trans(&p);
         let pos = self.shadow_z.screen_to_raster(&p);
         let direct = self.shadow_z.z_buffer_get(&pos)
@@ -465,7 +537,7 @@ where
             .unwrap_or(false);
         let shadow = 0.3 + 0.7 * direct as u8 as f32;
 
-        let gn = self.varying_n.dot(baryc).normalize();
+        let gn = self.varying_n.dot(&baryc).normalize();
         let [t, b] = darboux(&gn, pts, self.varying_u, self.varying_v).unwrap();
 
         let local = self.normal_map.eval(u, v);
@@ -476,7 +548,7 @@ where
         let a = self.spec.eval(u, v);
         let s = r.z().min(0.0).powi(a);
         let amb = self.ambient.eval(u, v);
-        const SPECULAR_COE: f32 = 0.6;
+        const SPECULAR_COE: f32 = 0.0;
         const DIFFUSE_COE: f32 = 1.2;
         let f = |x| {
             let x = amb + x as f32 * shadow * (DIFFUSE_COE * d + SPECULAR_COE * s);

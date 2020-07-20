@@ -160,6 +160,20 @@ macro_rules! array_wrapper {
 array_wrapper!(Vector);
 array_wrapper!(Point);
 
+#[macro_export]
+macro_rules! v {
+    ($($x:expr),+) => {
+        crate::geometry::Vector { data: [$($x),+] }
+    }
+}
+
+#[macro_export]
+macro_rules! p {
+    ($($x:expr),+) => {
+        crate::geometry::Point { data: [$($x),+] }
+    }
+}
+
 impl<'a, T, const N: usize> From<&'a Point<T, N>> for &'a Vector<T, N> {
     fn from(p: &'a Point<T, N>) -> &'a Vector<T, N> {
         unsafe { mem::transmute(p) }

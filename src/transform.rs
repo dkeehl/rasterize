@@ -211,6 +211,10 @@ impl Transform {
         self.m.inverse_transpose().map(|m| Transform { m })
     }
 
+    pub fn inverse(&self) -> Option<Transform> {
+        self.m.inverse().map(|m| Transform { m })
+    }
+
     pub fn trans<T: Trans>(&self, t: T) -> <T as Trans>::Output {
         t.trans(self)
     }

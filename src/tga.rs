@@ -1,4 +1,4 @@
-use crate::geometry::{Point2i, Point3f};
+use crate::geometry::{Point2i, Point3f, Point2f};
 use tinytga::Tga;
 use std::io::{self, Read, Write};
 use std::fs::File;
@@ -113,7 +113,7 @@ impl Buffer {
         Buffer { img, z_buffer }
     }
 
-    pub fn position(&mut self, p: &Point2i) -> Option<Position<'_>> {
+    pub fn position<'a>(&mut self, p: &'a Point2i) -> Option<Position<'_, 'a>> {
         let width = self.img.width as i32;
         let height = self.img.height as i32;
         if p[0] < 0 || p[0] >= width || p[1] < 0 || p[1] >= height {
@@ -122,7 +122,8 @@ impl Buffer {
             let pos = (p[1] * width + p[0]) as usize;
             Some(Position {
                 buf: self,
-                pos
+                p,
+                pos,
             })
         }
     }
@@ -131,12 +132,10 @@ impl Buffer {
         self.img.set(p, c)
     }
 
+    // x, y in screen space
+    // ndc in screen (-1, 1) (1, -1)
     fn pos(&self, x: f32, y: f32) -> Point2i {
         self.img.ndc_to_raster((x + 1.0) * 0.5, (1.0 - y) * 0.5)
-    }
-
-    pub fn world_to_raster(&self, p_world: &Point3f) -> Point2i {
-        self.pos(p_world[0], p_world[1])
     }
 
     pub fn screen_to_raster(&self, p_world: &Point3f) -> Point2i {
@@ -154,14 +153,20 @@ impl Buffer {
     pub fn z_buffer_get(&self, pos: &Point2i) -> Option<f32> {
         self.z_buffer.get((pos[0] * self.img.width as i32 +  pos[1]) as usize).map(|x| *x)
     }
+
+    pub fn into_raw_data(self) -> Vec<u32> {
+        let data = self.img.data;
+        unsafe { std::mem::transmute(data) }
+    }
 }
 
-pub struct Position<'a> {
+pub struct Position<'a, 'b> {
     buf: &'a mut Buffer,
+    p: &'b Point2i,
     pos: usize,
 }
 
-impl<'a> Position<'a> {
+impl<'a, 'b> Position<'a, 'b> {
     pub fn z_buffer_set(&mut self, z: f32) {
         self.buf.z_buffer[self.pos] = z
     }
@@ -172,6 +177,14 @@ impl<'a> Position<'a> {
 
     pub fn set_color(&mut self, c: TGAColor) {
         self.buf.img.data[self.pos] = c
+    }
+
+    pub fn sample(&self) -> Point2f {
+        let w_step = 2.0 / self.buf.img.width as f32;
+        let h_step = 2.0 / self.buf.img.height as f32;
+        let x = -1.0 + w_step * (self.p[0] as f32 + 0.5);
+        let y = 1.0 - h_step * (self.p[1] as f32 + 0.5);
+        (x, y).into()
     }
 }
 
@@ -199,7 +212,7 @@ impl Mul<Rate> for TGAColor {
     fn mul(self, s: Rate) -> TGAColor {
         let [a, r, g, b] = self.val.to_be_bytes();
         let f = |n| (n as f32 * s.get()) as u8;
-        TGAColor::rgba(f(r), f(g), f(b), f(a))
+        TGAColor::rgba(f(r), f(g), f(b), a)
     }
 }
 
