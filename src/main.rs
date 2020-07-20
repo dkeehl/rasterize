@@ -4,8 +4,7 @@ use rasterizer::model::Model;
 
 fn main() {
     // let img = floor();
-    // let img = head();
-    let img = plane();
+    let img = head();
     img.write_file("output.tga").unwrap();
     // rasterizer::gui::view(W as u32, H as u32, img.into_raw_data())
 }
@@ -44,37 +43,6 @@ fn head() -> Buffer {
         "obj/african_head/african_head_diffuse.tga",
         "obj/african_head/african_head_nm_tangent.tga",
         "obj/african_head/african_head_spec.tga").unwrap();
-    draw(&mut shader, &model, &mut buffer);
-    buffer
-}
-
-fn head0() -> Buffer {
-    let model = Model::read_file("obj/african_head/african_head.obj").unwrap();
-    let up = Vector3f::new(0.0, 1.0, 0.0);
-    let light_dir = Vector3f::new(1.0, 1.0, 1.0);
-    let center = Point3f::new(0.0, 0.0, 0.0);
-
-    let mut buffer = Buffer::new(W, H);
-    let cam = Camera::new(center, [0.0, 0.0, -1.0].into(), up, 4.0).unwrap();
-
-    // let texture = Constant::new(TGAColor::rgba(255, 255, 255, 255));
-    let texture = TGAImage::read_file("obj/african_head/african_head_diffuse.tga").unwrap();
-    let mut shader = rasterizer::Gouraud::new(&model, &cam, light_dir, texture);
-    draw(&mut shader, &model, &mut buffer);
-    buffer
-}
-
-fn plane() -> Buffer {
-    let model = Model::read_file("obj/StarSparrow/StarSparrow01.obj").unwrap();
-    let up = Vector3f::new(0.0, 1.0, 0.0);
-    let light_dir = Vector3f::new(1.0, 1.0, 1.0);
-    let center = Point3f::new(0.0, 20.0, 20.0);
-    let mut buffer = Buffer::new(W, H);
-    let cam = Camera::new(center, [0.0, -1.0, -1.0].into(), up, 4.0).unwrap();
-
-    // let texture = Constant::new(TGAColor::rgba(255, 255, 255, 255));
-    let texture = TGAImage::read_file("obj/StarSparrow/Textures/StarSparrow_Red.tga").unwrap();
-    let mut shader = rasterizer::Gouraud::new(&model, &cam, light_dir, texture);
     draw(&mut shader, &model, &mut buffer);
     buffer
 }

@@ -137,57 +137,9 @@ pub fn triangle<T: Shader>(pts: &[Point3f; 3], shader: &T, buf: &mut Buffer) {
     }
 }
 
-fn include(a: &Point2i, b: &Point2i, c: &Point2i, p: &Point2i) -> bool {
-    let ab = b - a;
-    let ac = c - a;
-    let ap = p - a;
-    let det = ab.x() * ac.y() - ab.y() * ac.x();
-    if det != 0 {
-        let s = det.signum();
-        let u = ap.x() * ac.y() - ap.y() * ac.x();
-        if u * s < 0 { return false; }
-        let v = ap.y() * ab.x() - ap.x() * ab.y();
-        v * s >= 0 && (det - u - v) * s >= 0
-    } else {
-        false
-    }
-}
-
-// pts is vertice of the triangle in world space
-pub fn triangle0<T: Shader>(pts: &[Point3f; 3], cam: &Camera, shader: &T, buf: &mut Buffer) {
-    // transform pts into raster space
-    let f = |i: usize| -> Point2i {
-        buf.screen_to_raster(&(&pts[i]).trans(&cam.world_to_screen))
-    };
-    let (a, b, c) = (f(0), f(1), f(2));
-    let mut bounds = Bounds2i::new(a, b);
-    bounds.add_point(c);
-    for fragment in bounds.points_inclusive() {
-        if include(&a, &b, &c, &fragment) {
-            if let Some(mut pos) = buf.position(&fragment) {
-                // take samples for this fragment, compute z value and the color
-                let sample = pos.sample();
-
-                // transform the sampling point to world space, compute the barycentric coordinate
-                let r = cam.generate_ray(&sample);
-                let baryc = r.intersect(pts);
-                let z = pts[0][2] * baryc[0] + pts[1][2] * baryc[1] + pts[2][2] * baryc[2];
-                if z > pos.z_buffer_get() {
-                    if let Some(color) = shader.fragment(&baryc) {
-                        pos.set_color(color);
-                        pos.z_buffer_set(z);
-                    }
-                }
-            }
-        }
-    }
-}
-
 pub struct Camera {
-    eye: Point3f,
     world_to_screen: Transform,
     world_normal_to_screen: Transform,
-    camera_to_world: Transform,
     world_to_camera: Transform,
     r: f32,
 }
@@ -207,31 +159,16 @@ impl Camera {
             [ 0.0,  0.0,  0.0, 1.0] ]));
         let origin_change = Transform::translate(-pos[0], -pos[1], -pos[2]);
         let world_to_camera = basis_change * origin_change;
-        let camera_to_world = world_to_camera.inverse()?;
         let r = -eye.recip();
         let camera_to_screen = camera_to_screen(eye);
         let world_to_screen = camera_to_screen * world_to_camera.clone();
         let world_normal_to_screen = world_to_screen.inverse_transpose()?;
-        let eye = camera_to_world.trans(p![0.0, 0.0, eye]);
         Some(Camera {
-            eye,
             world_to_screen,
             world_normal_to_screen,
-            camera_to_world,
             world_to_camera,
             r,
         })
-    }
-
-    // Ray in world space
-    pub fn generate_ray(&self, p_screen: &Point2f) -> Ray {
-        let p_camera = p!(p_screen[0], p_screen[1], 0.0);
-        let p_world = self.camera_to_world.trans(p_camera);
-        let d = (p_world - &self.eye).normalize();
-        Ray {
-            o: self.eye.clone(),
-            d,
-        }
     }
 
     // Given a barycentric coordinate in screen space, fix it to the camera/world space.
@@ -243,27 +180,6 @@ impl Camera {
         let c = baryc[2] / (self.r * pts[2].z() + 1.0);
         let sum = (a + b + c).recip();
         p!(a * sum, b * sum, c * sum)
-    }
-}
-
-pub struct Ray {
-    o: Point3f,
-    d: Vector3f,
-}
-
-impl Ray {
-    // intersect test with a plane, returns a barycentric coordinate with the 3 points.
-    // Moeller Trumbore Algorithm
-    fn intersect(&self, triangle: &[Point3f; 3]) -> Point3f {
-        let e1 = &triangle[1] - &triangle[0];
-        let e2 = &triangle[2] - &triangle[0];
-        let s = &self.o - &triangle[0];
-        let s1 = self.d.cross(&e2);
-        let s2 = s.cross(&e1);
-        let scaler = s1.dot(&e1).recip();
-        let b1 = s1.dot(&s) * scaler;
-        let b2 = s2.dot(&self.d) * scaler;
-        p!(1.0 - b1 - b2, b1, b2)
     }
 }
 
