@@ -449,7 +449,7 @@ where
         let p = self.light.world_to_screen.trans(&p);
         let pos = self.shadow_z.screen_to_raster(&p);
         let direct = self.shadow_z.z_buffer_get(&pos)
-            .map(|z| p[2] > z)
+            .map(|z| p[2] + 0.12 >= z)
             .unwrap_or(false);
         let shadow = 0.3 + 0.7 * direct as u8 as f32;
 

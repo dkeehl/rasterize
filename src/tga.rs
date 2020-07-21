@@ -113,7 +113,7 @@ impl Buffer {
         Buffer { img, z_buffer }
     }
 
-    pub fn position<'a>(&mut self, p: &'a Point2i) -> Option<Position<'_, 'a>> {
+    pub fn position(&mut self, p: &Point2i) -> Option<Position<'_>> {
         let width = self.img.width as i32;
         let height = self.img.height as i32;
         if p[0] < 0 || p[0] >= width || p[1] < 0 || p[1] >= height {
@@ -122,7 +122,6 @@ impl Buffer {
             let pos = (p[1] * width + p[0]) as usize;
             Some(Position {
                 buf: self,
-                p,
                 pos,
             })
         }
@@ -151,22 +150,48 @@ impl Buffer {
     }
     
     pub fn z_buffer_get(&self, pos: &Point2i) -> Option<f32> {
-        self.z_buffer.get((pos[0] * self.img.width as i32 +  pos[1]) as usize).map(|x| *x)
+        self.z_buffer.get((pos[1] * self.img.width as i32 +  pos[0]) as usize).map(|x| *x)
     }
 
     pub fn into_raw_data(self) -> Vec<u32> {
         let data = self.img.data;
         unsafe { std::mem::transmute(data) }
     }
+
+    pub fn view_z_buffer(&self) -> TGAImage {
+        let mut min = f32::INFINITY;
+        let mut max = f32::NEG_INFINITY;
+        for z in self.z_buffer.iter().filter(|z| z.is_finite()) {
+            min = min.min(*z);
+            max = max.max(*z);
+        }
+        if min < max {
+            let step = (max - min) / 255.0;
+            let into_color = |n: &f32| {
+                if *n < min {
+                    return BLACK;
+                }
+                let c = ((n - min) / step).floor() as u8;
+                TGAColor::rgba(c, c, c, 255)
+            };
+            let data = self.z_buffer.iter().map(into_color).collect();
+            TGAImage {
+                width: self.img.width,
+                height: self.img.height,
+                data,
+            }
+        } else {
+            unimplemented!()
+        }
+    }
 }
 
-pub struct Position<'a, 'b> {
+pub struct Position<'a> {
     buf: &'a mut Buffer,
-    p: &'b Point2i,
     pos: usize,
 }
 
-impl<'a, 'b> Position<'a, 'b> {
+impl<'a> Position<'a> {
     pub fn z_buffer_set(&mut self, z: f32) {
         self.buf.z_buffer[self.pos] = z
     }
@@ -177,14 +202,6 @@ impl<'a, 'b> Position<'a, 'b> {
 
     pub fn set_color(&mut self, c: TGAColor) {
         self.buf.img.data[self.pos] = c
-    }
-
-    pub fn sample(&self) -> Point2f {
-        let w_step = 2.0 / self.buf.img.width as f32;
-        let h_step = 2.0 / self.buf.img.height as f32;
-        let x = -1.0 + w_step * (self.p[0] as f32 + 0.5);
-        let y = 1.0 - h_step * (self.p[1] as f32 + 0.5);
-        (x, y).into()
     }
 }
 

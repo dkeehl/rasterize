@@ -4,6 +4,7 @@ use rasterizer::model::Model;
 
 fn main() {
     // let img = floor();
+    // let img = shadow_test().view_z_buffer();
     let img = head();
     img.write_file("output.tga").unwrap();
     // rasterizer::gui::view(W as u32, H as u32, img.into_raw_data())
@@ -50,7 +51,7 @@ fn head() -> Buffer {
 fn shadow_test() -> Buffer {
     let model = Model::read_file("obj/african_head/african_head.obj").unwrap();
     let up = Vector3f::new(0.0, 1.0, 0.0);
-    let light_dir = Vector3f::new(1.0, 1.0, 1.0);
+    let light_dir = Vector3f::new(0.0, 0.0, 1.0);
     let center = Point3f::new(0.0, 0.0, 0.0);
     let light = Camera::new(center, -light_dir, up, f32::INFINITY).unwrap();
     let mut shadow = Buffer::new(W, H);
